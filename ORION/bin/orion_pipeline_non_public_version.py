@@ -42,18 +42,6 @@ def load_metadata(metadata_file, database: str):
 
     return meta
 
-
-def load_sample_family(sample_meta_file: str) -> dict:
-    """
-    Reads your sample metadata TSV, splits Lineage on '|',
-    and returns { accession: family }. Later fix for better automation.
-    """
-    #custom tax assignment
-    df = pd.read_csv(sample_meta_file, sep=',', dtype={'GenomeName': str})
-    df['family'] = df['family (prediction)'].fillna('No Assignment').astype(str)
-
-    return dict(zip(df['GenomeName'], df['family']))
-
 def load_rep_block_metadata(metadata_file: str) -> pd.DataFrame:
     """
     Load only the REP entries from your metadata,
@@ -335,89 +323,6 @@ def enrich_block_in_syntenome(G: nx.Graph,
     df['significant'] = rej
     return df
 
-
-def enrich_family_in_syntenome(G: nx.Graph,
-                               partition: dict,
-                               sample_family: dict) -> pd.DataFrame:
-    """
-    For each syntenome and each sample assigned a family in G, perform a conditional one-tailed
-    hypergeometric 144349_with_92161.fa to assess statistical enrichment or depletion.
-
-    The 144349_with_92161.fa compares the proportion of syntenome samples connected to a family
-    against the proportion in the full sample population:
-        - If the family is more common in the syntenome than expected, an enrichment
-          (right-tailed) 144349_with_92161.fa is performed.
-        - If the family is less common, a depletion (left-tailed) 144349_with_92161.fa is performed.
-
-    Benjamini-Hochberg FDR correction is applied across all tests.
-    """
-    samples = [n for n, d in G.nodes(data=True) if d.get('type') == 'sample']
-    M = len(samples)
-    families = set(sample_family.get(s) for s in samples)
-    data = []
-
-    for com in sorted(set(partition.values())):
-        comm_samps = [s for s in samples if partition[s] == com]
-        N = len(comm_samps)
-
-        for fam in sorted(families):
-            K = sum(1 for s in samples if sample_family.get(s) == fam)
-            k = sum(1 for s in comm_samps if sample_family.get(s) == fam)
-
-            if (k / N) > (K / M):
-                p = hypergeom.sf(k - 1, M, K, N)
-                direction = 'enriched'
-            else:
-                p = hypergeom.cdf(k, M, K, N)
-                direction = 'depleted'
-
-            data.append({
-                'syntenome': com,
-                'family': fam,
-                'n_in_syn': k,
-                'n_in_pop': K,
-                'syn_size': N,
-                'pop_size': M,
-                'direction': direction,
-                'p_value': p
-            })
-
-    df = pd.DataFrame(data)
-    rej, qvals, _, _ = smm.multipletests(df['p_value'],
-                                         alpha=0.05,
-                                         method='fdr_bh')
-    df['q_value'] = qvals
-    df['significant'] = rej
-    return df
-
-def annotate_graph_with_enrichment(G, family_enrich_df, sample_family):
-    # Annotate sample nodes with family info and enrichment
-    for sample, fam in sample_family.items():
-        if not G.has_node(sample):
-            continue
-        data = G.nodes[sample]
-        data['family'] = fam
-        com = data.get('syntenome')
-
-        match = family_enrich_df[
-            (family_enrich_df['syntenome'] == com) &
-            (family_enrich_df['family'] == fam)
-            ]
-        if match.empty:
-            data.update({
-                'family_direction': None,
-                'family_p_value': None,
-                'family_q_value': None,
-                'family_significant': False
-            })
-        else:
-            row = match.iloc[0]
-            data['family_direction'] = row['direction']
-            data['family_p_value'] = float(row['p_value'])
-            data['family_q_value'] = float(row['q_value'])
-            data['family_significant'] = bool(row['significant'])
-
-
 def prune_graph_for_drawing(G: nx.Graph) -> nx.Graph:
     """
     Return a copy of G with sample nodes that connect to ≤2 block removed,
@@ -434,7 +339,6 @@ def prune_graph_for_drawing(G: nx.Graph) -> nx.Graph:
             G_vis.remove_node(n)
     return G_vis
 
-
 def write_jaccard_tsv(G: nx.Graph, tsv_path: str):
     """
     Write every undirected edge in G as three-column TSV:
@@ -448,13 +352,12 @@ def write_jaccard_tsv(G: nx.Graph, tsv_path: str):
             j = data.get('jaccard', 0.0)
             out.write(f"{b1}\t{b2}\t{j:.6f}\n")
 
-
 def write_graphml(G: nx.Graph, output_file: str):
     """Dump the full bipartite graph (with all attributes) to GraphML."""
     nx.write_graphml(G, output_file)
 
 
-def main(input_file, metadata_file, taxonomy, output: str, cb: int, min_samples: int, jaccard: int, database: str):
+def main(input_file, metadata_file, output: str, cb: int, min_samples: int, jaccard: int, database: str):
     start_time = time.time()
 
     print("Reading input…")
@@ -503,17 +406,11 @@ def main(input_file, metadata_file, taxonomy, output: str, cb: int, min_samples:
     J = build_block_jaccard_graph(
         G_full=G,
         sample_sets=results['sample_sets'],
-        threshold=args.jaccard
+        threshold=jaccard
     )
-
-    sample_family = load_sample_family(taxonomy)
 
     # Enrichment
     block_enrich = enrich_block_in_syntenome(G, partition)
-    family_enrich = enrich_family_in_syntenome(G, partition, sample_family)
-
-    # annotate the graph with both family & category enrichments
-    annotate_graph_with_enrichment(G, family_enrich, sample_family)
 
     # Outputs
     G_vis = prune_graph_for_drawing(G)
@@ -522,8 +419,6 @@ def main(input_file, metadata_file, taxonomy, output: str, cb: int, min_samples:
     write_jaccard_tsv(J, output + "_block_jaccard.tsv")
 
     block_enrich.to_csv(output + '_block_enrichment.tsv', sep='\t', index=False)
-    #custome family assignment (remove later)
-    family_enrich.to_csv(output + '_family_enrichment.tsv', sep='\t', index=False)
 
     # 1) Build a map: syntenome → set of enriched blocks in that syntenome
     enriched_map = (
@@ -562,7 +457,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Analyze BATS genome synteny using k-mers')
     parser.add_argument('--input', required=True, help='Input TSV file with cluster block data')
     parser.add_argument('--metadata', required=True, help='Metadata TSV file')
-    parser.add_argument('--taxonomy', required=True, help='Metadata TSV file for taxonomy.')
     parser.add_argument('--output', default='network_output', help='Output prefix for network files')
     parser.add_argument('--cb', type=int, default=3, help='Cluster-block size. Default = 3')
     parser.add_argument('--min_samples', type=int, default=5,
