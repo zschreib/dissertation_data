@@ -2,4 +2,7 @@
 
 This repository contains datasets, computational scripts, and supplementary resources associated with the dissertation titled, Unraveling Viral Gene Associations Through Integrative Computational Approaches.
 
+
+Fine-tuned viral embeddings from ENA and BATS: https://zenodo.org/records/15824689
+
 ---
